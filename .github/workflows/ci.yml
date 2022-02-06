@@ -1,0 +1,180 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+
+jobs:
+  build:
+    name: Test (${{ matrix.host.name }}) Subset ${{ matrix.subset }}
+    runs-on: ${{ matrix.host.runner }}
+    container: ${{ matrix.host.container }}
+
+    defaults:
+      run:
+        shell: bash
+
+    strategy:
+      fail-fast: false
+      matrix:
+        subset: [ 1, 2, 3, 4, 5 ]
+        host:
+        - name: linux-x86_64
+          runner: ubuntu-20.04
+          container: ''
+        - name: macos-x86_64
+          runner: macos-11
+          container: ''
+        - name: windows-x86_64
+          runner: windows-2019
+          container: ''
+
+    env:
+      SUBSET_COUNT: 5
+      PYTHON_DEPS: https://raw.githubusercontent.com/zephyrproject-rtos/zephyr/main/scripts/requirements.txt
+      SDK_URL: https://github.com/zephyrproject-rtos/sdk-ng-testing/releases/download/v0.90.16
+      SDK_NAME: zephyr-sdk-0.90.16
+      ZEPHYR_TOOLCHAIN_VARIANT: zephyr
+
+    steps:
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.10'
+
+    - name: Set up test environment (Linux)
+      if: ${{ runner.os == 'Linux' }}
+      run: |
+        # Install required system packages
+        sudo apt-get update
+        sudo apt-get install -y ccache device-tree-compiler gperf ninja-build
+
+        # Upgrade pip
+        python3 -m pip install --upgrade pip
+
+        # Install west
+        pip3 install --user --upgrade west
+        echo 'export PATH=~/.local/bin:"$PATH"' >> ~/.bashrc
+
+        # Install required Python packages
+        pip3 install --user --upgrade -r "${{ env.PYTHON_DEPS }}"
+
+        # Install Zephyr SDK
+        curl -O -L ${{ env.SDK_URL }}/${{ env.SDK_NAME }}_linux-x86_64.tar.gz
+        tar xvf ${{ env.SDK_NAME }}_linux-x86_64.tar.gz
+        ${{ env.SDK_NAME }}/setup.sh -c -t
+
+    - name: Set up test environment (macOS)
+      if: ${{ runner.os == 'macOS' }}
+      run: |
+        # Install required system packages
+        brew install ccache dtc gperf ninja
+
+        # Upgrade pip
+        sudo python3 -m pip install --upgrade pip
+
+        # Install west
+        sudo pip3 install --upgrade west
+
+        # Install required Python packages
+        sudo pip3 install --upgrade -r "${{ env.PYTHON_DEPS }}"
+
+        # Install Zephyr SDK
+        curl -O -L ${{ env.SDK_URL }}/${{ env.SDK_NAME }}_macos-x86_64.tar.gz
+        tar xvf ${{ env.SDK_NAME }}_macos-x86_64.tar.gz
+        ${{ env.SDK_NAME }}/setup.sh -c -t
+
+    - name: Set up test environment (Windows)
+      if: ${{ runner.os == 'Windows' }}
+      run: |
+        # Install required system packages
+        choco install ccache dtc-msys2 gperf ninja
+
+        # Upgrade pip
+        python3 -m pip install --upgrade pip
+
+        # Install west
+        pip3 install --upgrade west
+
+        # Install required Python packages
+        pip3 install --upgrade -r "${{ env.PYTHON_DEPS }}"
+
+        # Install Zephyr SDK
+        curl -O -L ${{ env.SDK_URL }}/${{ env.SDK_NAME }}_windows-x86_64.zip
+        unzip ${{ env.SDK_NAME }}_windows-x86_64.zip
+        ${{ env.SDK_NAME }}/setup.cmd //c //t
+
+        # Enable long paths support for Git
+        git config --system core.longpaths true
+
+    - name: Validate environment
+      run: |
+        set -x
+        bash --version
+        curl --version
+        git --version
+        python3 --version
+        cmake --version
+        ninja --version
+        ccache --version
+        dtc --version
+        gperf --version
+        gcc --version
+        g++ --version
+
+    - name: Set up Zephyr repository
+      run: |
+        # Create Zephyr workspace
+        ZEPHYR_WORKSPACE=${GITHUB_WORKSPACE}/zephyrproject
+        west init ${ZEPHYR_WORKSPACE}
+        cd ${ZEPHYR_WORKSPACE}
+
+        # TEST
+        pushd zephyr
+        git fetch origin pull/41930/head
+        git checkout FETCH_HEAD
+        popd
+
+        # Clone Zephyr repositories
+        west update
+        west zephyr-export
+
+        # Export variables
+        echo "ZEPHYR_WORKSPACE=${ZEPHYR_WORKSPACE}" >> $GITHUB_ENV
+        echo "ZEPHYR_ROOT=${ZEPHYR_WORKSPACE}/zephyr" >> $GITHUB_ENV
+
+    - name: Run test suites
+      run: |
+        # Create working directory
+        mkdir -p test
+        cd test
+
+        # Run tests on the default testing platforms with twister
+        # FIXME: Remove `--build-only` when QEMU is available on all platforms
+        TWISTER="${ZEPHYR_ROOT}/scripts/twister"
+        ${TWISTER} -v -N -M --inline-logs --retry-failed 3 \
+                   --subset ${{ matrix.subset }}/${{ env.SUBSET_COUNT }} \
+                   --build-only --short-build-path \
+                   --exclude-platform native_posix \
+                   -T ${ZEPHYR_ROOT}/samples/hello_world \
+                   -T ${ZEPHYR_ROOT}/tests/lib/newlib \
+                   -p qemu_cortex_a53 \
+                   -p qemu_arc_hs6x \
+                   -p qemu_arc_em \
+                   -p qemu_arc_hs \
+                   -p qemu_cortex_m0 \
+                   -p mps2_an385 \
+                   -p mps2_an521 \
+                   -p mps3_an547 \
+                   -p qemu_malta \
+                   -p qemu_nios2 \
+                   -p qemu_riscv32 \
+                   -p qemu_riscv64 \
+                   -p qemu_leon3 \
+                   -p qemu_x86 \
+                   -p qemu_x86_64 \
+                   -p intel_adsp_cavs15 \
+                   -p intel_s1000_crb \
+                   -p nxp_adsp_imx8 \
+                   -p nxp_adsp_imx8m \
+                   -p qemu_xtensa
